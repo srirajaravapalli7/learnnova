@@ -58,6 +58,14 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import {
+  authenticateUser,
+  registerStudent,
+  resetLocalPassword,
+  restoreUserSession,
+  signOutUser,
+  updateLocalProfile,
+} from "./auth.js";
+import {
   Link,
   Navigate,
   NavLink,
@@ -414,14 +422,28 @@ const seedData = () => ({
   ],
 });
 
-const readStored = () => {
+const readStored = (key = STORAGE_KEY) => {
   try {
-    const saved = localStorage.getItem(STORAGE_KEY);
+    const saved = localStorage.getItem(key);
     return saved ? JSON.parse(saved) : null;
   } catch (error) {
     console.error("Could not read LearnNova data from local storage; using sample data.", error);
     return null;
   }
+};
+
+const makeLmsData = (savedData) => {
+  const defaults = seedData();
+  const defaultCourses = new Map(defaults.courses.map((course) => [course.id, course]));
+  const savedCourses = savedData?.courses || defaults.courses;
+  const migrationCourses = savedData && !savedData.learnSphereV2
+    ? defaults.courses.filter((course) => ["math", "library", "design"].includes(course.id) && !savedCourses.some((savedCourse) => savedCourse.id === course.id))
+    : [];
+  const courses = [...savedCourses, ...migrationCourses].map((course) => ({
+    ...course,
+    rosterIds: course.rosterIds ?? defaultCourses.get(course.id)?.rosterIds ?? [],
+  }));
+  return savedData ? { ...defaults, ...savedData, courses, learnSphereV2: true } : { ...defaults, learnSphereV2: true };
 };
 
 const courseIcon = (icon, size = 22) => {
@@ -463,35 +485,33 @@ function App() {
     }
   });
   const [store, setStore] = useState(() => {
-    const saved = readStored();
-    const defaults = seedData();
-    const savedData = saved?.data;
-    const savedUser = saved?.user;
-    const user = savedUser?.email?.endsWith("@campusly.edu")
-      ? { ...savedUser, email: savedUser.email.replace(/@campusly\.edu$/, "@learnnova.edu") }
-      : savedUser || null;
-    const defaultCourses = new Map(defaults.courses.map((course) => [course.id, course]));
-    const savedCourses = savedData?.courses || defaults.courses;
-    const migrationCourses = savedData && !savedData.learnSphereV2
-      ? defaults.courses.filter((course) => ["math", "library", "design"].includes(course.id) && !savedCourses.some((savedCourse) => savedCourse.id === course.id))
-      : [];
-    const courses = [...savedCourses, ...migrationCourses].map((course) => ({
-      ...course,
-      rosterIds: course.rosterIds ?? defaultCourses.get(course.id)?.rosterIds ?? [],
-    }));
     return {
-      user,
-      data: savedData ? { ...defaults, ...savedData, courses, learnSphereV2: true } : { ...defaults, learnSphereV2: true },
+      user: null,
+      data: makeLmsData(null),
     };
   });
+  const [authState, setAuthState] = useState({ loading: true, user: null, error: "" });
 
   useEffect(() => {
+    if (!store.user?.id) return;
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ user: store.user, data: store.data }));
+      localStorage.setItem(`${STORAGE_KEY}:${store.user.id}`, JSON.stringify({ data: store.data }));
     } catch (error) {
       console.error("Could not save LearnNova data to local storage.", error);
     }
-  }, [store]);
+  }, [store.data, store.user?.id]);
+
+  useEffect(() => {
+    try {
+      const user = restoreUserSession();
+      setAuthState({ loading: false, user, error: "" });
+      if (user) {
+        setStore((current) => ({ user, data: makeLmsData(readStored(`${STORAGE_KEY}:${user.id}`)?.data) }));
+      }
+    } catch (error) {
+      setAuthState({ loading: false, user: null, error: error.message || "Could not restore your local session." });
+    }
+  }, []);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -513,20 +533,40 @@ function App() {
     }));
   };
 
-  const login = (role) => {
-    const user = role === "instructor"
-      ? { id: "instructor", name: "Dr. Maya Patel", email: "instructor@learnnova.edu", role: "instructor", title: "Instructor" }
-      : { id: "student", name: "Alex Morgan", email: "student@learnnova.edu", role: "student", title: "Computer Science · Year 2" };
-    setStore((current) => ({ ...current, user }));
+  const login = async ({ email, password, remember }) => {
+    const user = await authenticateUser({ email, password, remember });
+    setStore((current) => current.user?.id === user.id
+      ? { ...current, user }
+      : { user, data: makeLmsData(readStored(`${STORAGE_KEY}:${user.id}`)?.data) });
+    setAuthState({ loading: false, user, error: "" });
   };
 
-  const logout = () => setStore((current) => ({ ...current, user: null }));
-  const updateUser = (updates) => setStore((current) => ({ ...current, user: { ...current.user, ...updates } }));
+  const logout = () => {
+    try {
+      signOutUser();
+      setStore((current) => ({ ...current, user: null }));
+      setAuthState({ loading: false, user: null, error: "" });
+    } catch (error) {
+      window.alert(error.message || "Could not clear the local sign-in session.");
+    }
+  };
+  const updateUser = (updates) => {
+    if (!authState.user) throw new Error("You must be signed in to update your profile.");
+    const user = updateLocalProfile(authState.user.id, updates.name);
+    setAuthState((current) => ({ ...current, user }));
+    setStore((current) => ({ ...current, user }));
+  };
   const toggleTheme = () => setTheme((current) => current === "dark" ? "light" : "dark");
+
+  if (authState.loading) {
+    return <div className="auth-loading" role="status">Restoring your LearnNova session…</div>;
+  }
 
   return (
     <Routes>
-      <Route path="/login" element={store.user ? <Navigate to="/app" replace /> : <LoginPage onLogin={login} />} />
+      <Route path="/login" element={store.user ? <Navigate to="/app" replace /> : <LoginPage initialMode="signin" onLogin={login} authError={authState.error} />} />
+      <Route path="/signup" element={store.user ? <Navigate to="/app" replace /> : <LoginPage initialMode="signup" onLogin={login} authError={authState.error} />} />
+      <Route path="/reset-password" element={<Navigate to="/login" replace />} />
       <Route path="/" element={<CampusHome user={store.user} data={store.data} theme={theme} onToggleTheme={toggleTheme} />} />
       <Route path="/campus" element={<CampusHome user={store.user} data={store.data} theme={theme} onToggleTheme={toggleTheme} />} />
       <Route element={store.user ? <AppLayout user={store.user} onLogout={logout} data={store.data} updateData={updateData} addActivity={addActivity} updateUser={updateUser} theme={theme} onToggleTheme={toggleTheme} /> : <Navigate to="/login" replace />}>
@@ -559,31 +599,83 @@ function BrandLogo({ className = "" }) {
   );
 }
 
-function LoginPage({ onLogin }) {
-  const [role, setRole] = useState("student");
+function LoginPage({ initialMode, onLogin, authError }) {
+  const [mode, setMode] = useState(initialMode);
   const [showPassword, setShowPassword] = useState(false);
-  const [email, setEmail] = useState("student@learnnova.edu");
-  const [password, setPassword] = useState("learn123");
-  const [error, setError] = useState("");
+  const [email, setEmail] = useState("");
+  const [fullName, setFullName] = useState("");
+  const [department, setDepartment] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [remember, setRemember] = useState(true);
+  const [error, setError] = useState(authError || "");
+  const [notice, setNotice] = useState("");
+  const [busy, setBusy] = useState(false);
+  const navigate = useNavigate();
 
-  const setSelectedRole = (nextRole) => {
-    setRole(nextRole);
-    setEmail(nextRole === "student" ? "student@learnnova.edu" : "instructor@learnnova.edu");
-    setPassword(nextRole === "student" ? "learn123" : "teach123");
+  useEffect(() => {
+    setError(authError || "");
+  }, [authError]);
+
+  const changeMode = (nextMode) => {
+    setMode(nextMode);
     setError("");
+    setNotice("");
   };
 
-  const handleSubmit = (event) => {
+  const handleSubmit = async (event) => {
     event.preventDefault();
-    const valid = role === "student"
-      ? email === "student@learnnova.edu" && password === "learn123"
-      : email === "instructor@learnnova.edu" && password === "teach123";
-    if (!valid) {
-      setError("Those credentials don't match the selected demo account.");
+    setError("");
+    setNotice("");
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+      setError("Enter a valid email address.");
       return;
     }
-    onLogin(role);
+    setBusy(true);
+    try {
+      if (mode === "signup") {
+        if (!fullName.trim()) throw new Error("Enter your full name.");
+        if (!department) throw new Error("Choose your department.");
+        if (password.length < 8 || !/[a-z]/.test(password) || !/[A-Z]/.test(password) || !/\d/.test(password)) {
+          throw new Error("Use at least 8 characters with an uppercase letter, a lowercase letter, and a number.");
+        }
+        if (password !== confirmPassword) throw new Error("The passwords do not match.");
+        await registerStudent({ fullName, email: normalizedEmail, department, password });
+        setNotice("Your student account has been created. Sign in to open your dashboard.");
+        setPassword("");
+        setConfirmPassword("");
+        setMode("signin");
+      } else if (mode === "signin") {
+        if (!password) throw new Error("Enter your password.");
+        await onLogin({ email: normalizedEmail, password, remember });
+        navigate("/app", { replace: true });
+      } else if (mode === "forgot") {
+        if (password.length < 8 || !/[a-z]/.test(password) || !/[A-Z]/.test(password) || !/\d/.test(password)) {
+          throw new Error("Use at least 8 characters with an uppercase letter, a lowercase letter, and a number.");
+        }
+        if (password !== confirmPassword) throw new Error("The passwords do not match.");
+        await resetLocalPassword({ email: normalizedEmail, password });
+        setNotice("Password reset for the local account. This demo cannot verify email ownership. Sign in with your new password.");
+        setPassword("");
+        setConfirmPassword("");
+        setMode("signin");
+      }
+    } catch (submitError) {
+      const message = submitError.message || "We couldn't complete that request. Please try again.";
+      if (/already registered|already exists/i.test(message)) {
+        setError("An account already exists for this email. Sign in instead or reset your password.");
+      } else {
+        setError(message);
+      }
+    } finally {
+      setBusy(false);
+    }
   };
+
+  const isSignup = mode === "signup";
+  const isForgot = mode === "forgot";
+  const heading = isSignup ? "Create your account" : isForgot ? "Reset your password" : "Sign in to your account";
 
   return (
     <main className="login-page">
@@ -610,23 +702,44 @@ function LoginPage({ onLogin }) {
         <div className="login-form-wrap">
           <div className="login-mobile-brand"><BrandLogo /></div>
           <div className="login-heading">
-            <span className="eyebrow">WELCOME BACK</span>
-            <h2>Sign in to your account</h2>
-            <p>Your learning space is just a few clicks away.</p>
+            <span className="eyebrow">{isSignup ? "JOIN LEARNNOVA" : isForgot ? "ACCOUNT RECOVERY" : "WELCOME BACK"}</span>
+            <h2>{heading}</h2>
+            <p>{isSignup ? "Set up your student profile and begin learning." : isForgot ? "Update the password saved for this browser account." : "Your learning space is just a few clicks away."}</p>
+            {isForgot && <p className="password-reset-warning">Local password reset does not verify email ownership. This is demo-only.</p>}
+            <p className="auth-demo-note">Demo-only authentication: accounts stay in this browser and are not protected by a server.</p>
           </div>
-          <div className="role-picker" aria-label="Select account type">
-            <button type="button" className={role === "student" ? "role-option selected" : "role-option"} onClick={() => setSelectedRole("student")}><GraduationCap size={17} /> Student</button>
-            <button type="button" className={role === "instructor" ? "role-option selected" : "role-option"} onClick={() => setSelectedRole("instructor")}><Users size={17} /> Instructor</button>
-          </div>
-          <form onSubmit={handleSubmit} className="login-form">
-            <label htmlFor="login-email">Email address</label>
-            <div className="input-with-icon"><Mail size={17} /><input id="login-email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="username" required /></div>
-            <div className="password-label"><label htmlFor="login-password">Password</label><button type="button" className="text-button">Forgot password?</button></div>
-            <div className="input-with-icon"><LockKeyhole size={17} /><input id="login-password" type={showPassword ? "text" : "password"} value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" required /><button className="password-toggle" type="button" onClick={() => setShowPassword(!showPassword)} aria-label={showPassword ? "Hide password" : "Show password"}>{showPassword ? <EyeOff size={17} /> : <Eye size={17} />}</button></div>
-            {error && <p className="form-error">{error}</p>}
-            <button className="button button-primary login-submit" type="submit">Sign in <ArrowRight size={17} /></button>
+          <form onSubmit={handleSubmit} className={`login-form ${isSignup ? "login-signup-form" : ""}`}>
+            {isSignup && <>
+              <label htmlFor="signup-name">Full name</label>
+              <div className="input-with-icon"><UserRound size={17} /><input id="signup-name" value={fullName} onChange={(event) => setFullName(event.target.value)} autoComplete="name" required /></div>
+            </>}
+            <>
+              <label htmlFor="login-email">Email address</label>
+              <div className="input-with-icon"><Mail size={17} /><input id="login-email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" required /></div>
+            </>
+            {isSignup && <>
+              <label htmlFor="signup-student-id">Student ID</label>
+              <div className="input-with-icon"><GraduationCap size={17} /><input id="signup-student-id" value="Assigned automatically after account creation" readOnly /></div>
+              <label htmlFor="signup-department">Department</label>
+              <div className="input-with-icon"><select id="signup-department" value={department} onChange={(event) => setDepartment(event.target.value)} required><option value="" disabled>Select your department</option>{departments.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select></div>
+            </>}
+            <>
+              <div className="password-label"><label htmlFor="login-password">{isSignup || isForgot ? "New password" : "Password"}</label>{!isSignup && !isForgot && <button type="button" className="text-button" onClick={() => changeMode("forgot")}>Forgot password?</button>}</div>
+              <div className="input-with-icon"><LockKeyhole size={17} /><input id="login-password" type={showPassword ? "text" : "password"} value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={isSignup || isForgot ? "new-password" : "current-password"} required minLength={isSignup || isForgot ? 8 : undefined} /><button className="password-toggle" type="button" onClick={() => setShowPassword(!showPassword)} aria-label={showPassword ? "Hide password" : "Show password"}>{showPassword ? <EyeOff size={17} /> : <Eye size={17} />}</button></div>
+              {(isSignup || isForgot) && <>
+                <span className="password-strength-hint">At least 8 characters, including uppercase, lowercase, and a number.</span>
+                <div className="password-label"><label htmlFor="confirm-password">Confirm password</label></div>
+                <div className="input-with-icon"><LockKeyhole size={17} /><input id="confirm-password" type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} autoComplete="new-password" required minLength="8" /></div>
+              </>}
+            </>
+            {!isSignup && !isForgot && <label className="remember-me"><input type="checkbox" checked={remember} onChange={(event) => setRemember(event.target.checked)} /><span>Remember me</span></label>}
+            {error && <p className="form-error" role="alert">{error}</p>}
+            {notice && <p className="form-success" role="status">{notice}</p>}
+            <button className="button button-primary login-submit" type="submit" disabled={busy}>{busy ? "Please wait…" : isSignup ? "Create account" : isForgot ? "Reset local password" : "Sign in"} {!busy && <ArrowRight size={17} />}</button>
           </form>
-          <div className="demo-hint"><div className="demo-hint-icon"><CircleHelp size={17} /></div><div><b>Demo account ready</b><p>{role === "student" ? "student@learnnova.edu · learn123" : "instructor@learnnova.edu · teach123"}</p></div><CheckCircle2 size={17} className="demo-check" /></div>
+          {isForgot
+            ? <p className="login-switch"><button type="button" className="text-button" onClick={() => changeMode("signin")}>Back to Sign in</button></p>
+            : <p className="login-switch">{isSignup ? "Already have an account?" : "Don't have an account?"}{" "}<Link to={isSignup ? "/login" : "/signup"} onClick={() => changeMode(isSignup ? "signin" : "signup")}>{isSignup ? "Sign in" : "Sign up"}</Link></p>}
           <p className="login-legal">By continuing, you agree to our <button className="text-button">Terms of Service</button> and <button className="text-button">Privacy Policy</button>.</p>
         </div>
       </section>
@@ -833,7 +946,7 @@ function Dashboard() {
   return (
     <div className="dashboard-page">
       <div className="dashboard-welcome"><div className="welcome-copy"><span className="eyebrow eyebrow-light"><Sparkles size={14} /> YOUR LEARNING SPACE</span><h1>{isInstructor ? (new Date().getHours() < 12 ? "Good morning" : new Date().getHours() < 18 ? "Good afternoon" : "Good evening") : "Welcome back"},<br /><em>{firstName}.</em></h1><p>{isInstructor ? "Here's what's happening across your courses today." : "Every step forward is progress. Here's what's happening with your learning."}</p><Link className="welcome-button" to={isInstructor ? "/courses" : "/browse"}>{isInstructor ? "Manage your courses" : "Explore courses"} <ArrowRight size={16} /></Link></div><div className="welcome-art" aria-hidden="true"><div className="art-ring ring-one" /><div className="art-ring ring-two" /><div className="art-planet"><GraduationCap size={43} strokeWidth={1.35} /></div><div className="art-spark art-spark-one">✦</div><div className="art-spark art-spark-two">✧</div><span className="art-caption">learn at<br />your pace</span></div><div className="welcome-index"><span>01</span><span className="index-line" /><span>04</span></div></div>
-      <div className="dashboard-meta"><span><CalendarDays size={15} /> {dateText(new Date(), { weekday: "long", month: "long", day: "numeric" })}</span><span className="meta-divider" /><span className="semester-tag"><span /> Fall semester · {new Date().getFullYear()}</span></div>
+      <div className="dashboard-meta"><span><CalendarDays size={15} /> {dateText(new Date(), { weekday: "long", month: "long", day: "numeric" })}</span><span className="meta-divider" /><span className="semester-tag"><span /> Fall semester · {new Date().getFullYear()}</span>{!isInstructor && <><span className="meta-divider" /><span><GraduationCap size={15} /> {user.department} · ID {user.studentId}</span></>}</div>
       <div className="stats-grid">
         <StatCard label={isInstructor ? "Active courses" : "Enrolled courses"} value={myCourses.length} hint={isInstructor ? `${data.courses.reduce((total, course) => total + Number(course.students || 0), 0)} students enrolled` : "Keep up your momentum"} icon={BookOpen} theme="blue" trend={<><ArrowUpRight size={14} /> +2 this month</>} />
         <StatCard label={isInstructor ? "To review" : "Pending assignments"} value={isInstructor ? data.submissions.filter((submission) => submission.marks === null).length : pending.length} hint={isInstructor ? "Submissions need your feedback" : "A little at a time goes far"} icon={Clock3} theme="amber" trend={<><span className="trend-dot" /> {isInstructor ? "Ready when you are" : `${pending.length} coming up`}</>} />
@@ -1116,12 +1229,24 @@ function ProfilePage() {
   const { user, updateUser, data } = useLms();
   const [name, setName] = useState(user.name);
   const [saved, setSaved] = useState(false);
+  const [error, setError] = useState("");
   const student = user.role === "student";
   const courseCount = student ? data.courses.filter((course) => course.enrolled).length : data.courses.length;
-  const save = (event) => { event.preventDefault(); if (!name.trim()) return; updateUser({ name: name.trim() }); setSaved(true); window.setTimeout(() => setSaved(false), 2500); };
+  const save = async (event) => {
+    event.preventDefault();
+    if (!name.trim()) return;
+    setError("");
+    try {
+      await updateUser({ name: name.trim() });
+      setSaved(true);
+      window.setTimeout(() => setSaved(false), 2500);
+    } catch (saveError) {
+      setError(saveError.message || "Your profile could not be updated.");
+    }
+  };
   return <>
     <PageHeading eyebrow="YOUR SPACE" title="My profile" description="A little snapshot of who you are and what you're learning." />
-    <div className="profile-layout"><section className="profile-card panel"><div className="profile-cover"><span className="profile-cover-star">✧</span><div className={`profile-big-avatar ${user.role === "instructor" ? "avatar-purple" : ""}`}>{initials(user.name)}</div></div><div className="profile-identity"><span className="role-tag">{student ? "STUDENT" : "INSTRUCTOR"}</span><h2>{user.name}</h2><p>{user.title}</p><span className="profile-email"><Mail size={15} /> {user.email}</span></div><div className="profile-stats"><div><b>{courseCount}</b><span>{student ? "Courses" : "Courses teaching"}</span></div><div><b>{student ? data.submissions.filter((item) => item.studentId === user.id).length : data.submissions.length}</b><span>Submissions</span></div><div><b>2024</b><span>Member since</span></div></div></section><section className="panel profile-edit-panel"><div className="panel-heading"><div><span className="eyebrow">PERSONAL DETAILS</span><h2>About you</h2></div><div className="profile-edit-icon"><Pencil size={17} /></div></div><form className="profile-edit-form" onSubmit={save}><div className="form-field"><label>Full name</label><input value={name} onChange={(event) => setName(event.target.value)} /></div><div className="form-field"><label>Email address</label><input value={user.email} disabled /></div><div className="form-field"><label>{student ? "Program" : "Role"}</label><input value={user.title} disabled /></div><div className="profile-save-line"><span>{saved && <span className="save-confirm"><CheckCircle2 size={15} /> Profile updated</span>}</span><button className="button button-primary" type="submit">Save changes <ArrowRight size={15} /></button></div></form></section></div>
+    <div className="profile-layout"><section className="profile-card panel"><div className="profile-cover"><span className="profile-cover-star">✧</span><div className={`profile-big-avatar ${user.role === "instructor" ? "avatar-purple" : ""}`}>{initials(user.name)}</div></div><div className="profile-identity"><span className="role-tag">{student ? "STUDENT" : "INSTRUCTOR"}</span><h2>{user.name}</h2><p>{user.department}</p><span className="profile-email"><Mail size={15} /> {user.email}</span>{student && <span className="profile-email"><GraduationCap size={15} /> Student ID: {user.studentId}</span>}</div><div className="profile-stats"><div><b>{courseCount}</b><span>{student ? "Courses" : "Courses teaching"}</span></div><div><b>{student ? data.submissions.filter((item) => item.studentId === user.id).length : data.submissions.length}</b><span>Submissions</span></div><div><b>{user.createdAt ? new Date(user.createdAt).getFullYear() : "—"}</b><span>Member since</span></div></div></section><section className="panel profile-edit-panel"><div className="panel-heading"><div><span className="eyebrow">PERSONAL DETAILS</span><h2>About you</h2></div><div className="profile-edit-icon"><Pencil size={17} /></div></div><form className="profile-edit-form" onSubmit={save}><div className="form-field"><label>Full name</label><input value={name} onChange={(event) => setName(event.target.value)} /></div><div className="form-field"><label>Email address</label><input value={user.email} disabled /></div><div className="form-field"><label>{student ? "Department" : "Role"}</label><input value={student ? user.department : user.title} disabled /></div>{student && <div className="form-field"><label>Student ID</label><input value={user.studentId} disabled /></div>}{error && <p className="form-error" role="alert">{error}</p>}<div className="profile-save-line"><span>{saved && <span className="save-confirm"><CheckCircle2 size={15} /> Profile updated</span>}</span><button className="button button-primary" type="submit">Save changes <ArrowRight size={15} /></button></div></form></section></div>
   </>;
 }
 
@@ -1136,7 +1261,7 @@ function SettingsPage() {
   };
   return <>
     <PageHeading eyebrow="MAKE IT YOURS" title="Settings" description="Choose how LearnNova keeps you in the loop." />
-    <div className="settings-layout"><section className="panel settings-panel"><div className="panel-heading"><div><span className="eyebrow">NOTIFICATIONS</span><h2>Your preferences</h2></div><span className="settings-heading-icon"><Bell size={18} /></span></div><p className="settings-intro">Choose the updates you would like to receive in your LearnNova workspace.</p><SettingRow title="Email updates" description="Get a weekly summary of your learning activity." value={settings.emailUpdates} onChange={() => toggle("emailUpdates")} /><SettingRow title="Deadline reminders" description="A heads-up before an assignment is due." value={settings.deadlineReminders} onChange={() => toggle("deadlineReminders")} /><SettingRow title="Announcement alerts" description="Stay informed when your instructors share an update." value={settings.announcementAlerts} onChange={() => toggle("announcementAlerts")} /></section><section className="panel settings-panel"><div className="panel-heading"><div><span className="eyebrow">DEMO DATA</span><h2>Start fresh</h2></div><span className="settings-heading-icon"><Download size={18} /></span></div><p className="settings-intro">Restore the sample content if you want to explore LearnNova from the beginning.</p><div className="reset-row"><div><b>Restore sample data</b><span>Courses, assignments, grades, and announcements</span></div><button className="button button-outline" onClick={reset}>Restore data</button></div></section><div className="settings-note"><CircleHelp size={17} /><span>Your learning data is saved on this device only. Clearing your browser storage will remove it.</span></div></div>
+    <div className="settings-layout"><section className="panel settings-panel"><div className="panel-heading"><div><span className="eyebrow">NOTIFICATIONS</span><h2>Your preferences</h2></div><span className="settings-heading-icon"><Bell size={18} /></span></div><p className="settings-intro">Choose the updates you would like to receive in your LearnNova workspace.</p><SettingRow title="Email updates" description="Get a weekly summary of your learning activity." value={settings.emailUpdates} onChange={() => toggle("emailUpdates")} /><SettingRow title="Deadline reminders" description="A heads-up before an assignment is due." value={settings.deadlineReminders} onChange={() => toggle("deadlineReminders")} /><SettingRow title="Announcement alerts" description="Stay informed when your instructors share an update." value={settings.announcementAlerts} onChange={() => toggle("announcementAlerts")} /></section><section className="panel settings-panel"><div className="panel-heading"><div><span className="eyebrow">DEMO DATA</span><h2>Start fresh</h2></div><span className="settings-heading-icon"><Download size={18} /></span></div><p className="settings-intro">Restore the sample content if you want to explore LearnNova from the beginning.</p><div className="reset-row"><div><b>Restore sample data</b><span>Courses, assignments, grades, and announcements</span></div><button className="button button-outline" onClick={reset}>Restore data</button></div></section><div className="settings-note"><CircleHelp size={17} /><span>Your profile and LMS sample content are saved in this browser only.</span></div></div>
   </>;
 }
 

@@ -58,13 +58,19 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import {
+  authenticateAdmin,
   authenticateUser,
+  ensureDemoAdminAccount,
+  getRegisteredUsers,
   registerStudent,
   resetLocalPassword,
+  restoreAdminSession,
   restoreUserSession,
+  signOutAdmin,
   signOutUser,
   updateLocalProfile,
 } from "./auth.js";
+import AdminModule, { AdminLoginPage } from "./AdminModule.jsx";
 import {
   Link,
   Navigate,
@@ -79,6 +85,9 @@ import {
 
 const STORAGE_KEY = "campusly-lms-v1";
 const THEME_KEY = "learnsphere-theme-v1";
+const SHARED_COURSE_KEY = "learnnova_courses";
+const SHARED_ASSIGNMENT_KEY = "learnnova_assignments";
+const SHARED_ANNOUNCEMENT_KEY = "learnnova_announcements";
 const CampusScene = lazy(() => import("./CampusScene.jsx"));
 
 const daysFromNow = (days) => {
@@ -446,6 +455,48 @@ const makeLmsData = (savedData) => {
   return savedData ? { ...defaults, ...savedData, courses, learnSphereV2: true } : { ...defaults, learnSphereV2: true };
 };
 
+const readSharedContent = () => {
+  const defaults = seedData();
+  const savedCourses = readStored(SHARED_COURSE_KEY);
+  const savedAssignments = readStored(SHARED_ASSIGNMENT_KEY);
+  const savedAnnouncements = readStored(SHARED_ANNOUNCEMENT_KEY);
+  const accounts = readStored("learnnova_users");
+  const legacyData = Array.isArray(accounts)
+    ? accounts.map((account) => readStored(`${STORAGE_KEY}:${account.id}`)?.data).filter(Boolean)
+    : [];
+  const mergeLegacyItems = (key, defaultsList) => {
+    const items = new Map(defaultsList.map((item) => [item.id, item]));
+    legacyData.forEach((data) => {
+      (data[key] || []).forEach((item) => {
+        if (!items.has(item.id)) items.set(item.id, item);
+      });
+    });
+    return [...items.values()];
+  };
+  return {
+    courses: Array.isArray(savedCourses) ? savedCourses : mergeLegacyItems("courses", defaults.courses),
+    assignments: Array.isArray(savedAssignments) ? savedAssignments : mergeLegacyItems("assignments", defaults.assignments),
+    announcements: Array.isArray(savedAnnouncements) ? savedAnnouncements : mergeLegacyItems("announcements", defaults.announcements),
+  };
+};
+
+const mergeSharedContent = (personalData, sharedContent) => {
+  const personalCourses = new Map(personalData.courses.map((course) => [course.id, course]));
+  const assignmentIds = new Set(sharedContent.assignments.map((assignment) => assignment.id));
+  return {
+    ...personalData,
+    courses: sharedContent.courses.map((course) => {
+      const personalCourse = personalCourses.get(course.id);
+      return personalCourse
+        ? { ...personalCourse, ...course, enrolled: personalCourse.enrolled, progress: personalCourse.progress, rosterIds: personalCourse.rosterIds || course.rosterIds || [] }
+        : { ...course, enrolled: false, progress: 0, rosterIds: course.rosterIds || [] };
+    }),
+    assignments: sharedContent.assignments,
+    announcements: sharedContent.announcements,
+    submissions: personalData.submissions.filter((submission) => assignmentIds.has(submission.assignmentId)),
+  };
+};
+
 const courseIcon = (icon, size = 22) => {
   const icons = {
     code: Code2,
@@ -491,6 +542,19 @@ function App() {
     };
   });
   const [authState, setAuthState] = useState({ loading: true, user: null, error: "" });
+  const [adminState, setAdminState] = useState({ admin: null, error: "" });
+  const [sharedContent, setSharedContent] = useState(readSharedContent);
+  const sharedContentRef = useRef(sharedContent);
+  const [registeredUsers, setRegisteredUsers] = useState(() => {
+    try {
+      return getRegisteredUsers();
+    } catch (error) {
+      console.error("Could not read registered LearnNova users.", error);
+      return [];
+    }
+  });
+  const storeRef = useRef(store);
+  storeRef.current = store;
 
   useEffect(() => {
     if (!store.user?.id) return;
@@ -502,16 +566,80 @@ function App() {
   }, [store.data, store.user?.id]);
 
   useEffect(() => {
-    try {
-      const user = restoreUserSession();
-      setAuthState({ loading: false, user, error: "" });
-      if (user) {
-        setStore((current) => ({ user, data: makeLmsData(readStored(`${STORAGE_KEY}:${user.id}`)?.data) }));
+    let active = true;
+    const restoreSessions = async () => {
+      let user = null;
+      let admin = null;
+      let userError = "";
+      let adminError = "";
+      try {
+        user = restoreUserSession();
+      } catch (error) {
+        userError = error.message || "Could not restore your local session.";
       }
-    } catch (error) {
-      setAuthState({ loading: false, user: null, error: error.message || "Could not restore your local session." });
-    }
+      try {
+        await ensureDemoAdminAccount();
+        admin = restoreAdminSession();
+      } catch (error) {
+        adminError = error.message || "Could not restore the admin session.";
+      }
+      if (!active) return;
+      setAuthState({ loading: false, user, error: userError });
+      setAdminState({ admin, error: adminError });
+      if (user) {
+        setStore((current) => ({
+          user,
+          data: mergeSharedContent(makeLmsData(readStored(`${STORAGE_KEY}:${user.id}`)?.data), sharedContentRef.current),
+        }));
+      }
+    };
+    restoreSessions();
+    return () => { active = false; };
   }, []);
+
+  useEffect(() => {
+    sharedContentRef.current = sharedContent;
+    try {
+      const defaults = [
+        [SHARED_COURSE_KEY, sharedContent.courses],
+        [SHARED_ASSIGNMENT_KEY, sharedContent.assignments],
+        [SHARED_ANNOUNCEMENT_KEY, sharedContent.announcements],
+      ];
+      defaults.forEach(([key, value]) => {
+        if (localStorage.getItem(key) === null) localStorage.setItem(key, JSON.stringify(value));
+      });
+    } catch (error) {
+      console.error("Could not initialize shared LearnNova LMS data.", error);
+    }
+    setStore((current) => current.user
+      ? { ...current, data: mergeSharedContent(current.data, sharedContent) }
+      : current);
+  }, [sharedContent]);
+
+  useEffect(() => {
+    const refreshStorageData = (event) => {
+      if ([SHARED_COURSE_KEY, SHARED_ASSIGNMENT_KEY, SHARED_ANNOUNCEMENT_KEY].includes(event.key)) {
+        const latest = readSharedContent();
+        sharedContentRef.current = latest;
+        setSharedContent(latest);
+      }
+      if (event.key === "learnnova_users") {
+        try {
+          setRegisteredUsers(getRegisteredUsers());
+        } catch (error) {
+          console.error("Could not refresh registered LearnNova users.", error);
+        }
+      }
+      if (store.user?.id && event.key === `${STORAGE_KEY}:${store.user.id}`) {
+        setStore((current) => ({
+          ...current,
+          data: mergeSharedContent(makeLmsData(readStored(event.key)?.data), sharedContentRef.current),
+        }));
+      }
+    };
+    window.addEventListener("storage", refreshStorageData);
+    return () => window.removeEventListener("storage", refreshStorageData);
+  }, [store.user?.id]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -523,7 +651,20 @@ function App() {
   }, [theme]);
 
   const updateData = (updater) => {
-    setStore((current) => ({ ...current, data: typeof updater === "function" ? updater(current.data) : updater }));
+    const current = storeRef.current;
+    const nextData = typeof updater === "function" ? updater(current.data) : updater;
+    const nextStore = { ...current, data: nextData };
+    storeRef.current = nextStore;
+    setStore(nextStore);
+    if (current.user?.role === "instructor"
+      && (nextData.courses !== current.data.courses || nextData.assignments !== current.data.assignments || nextData.announcements !== current.data.announcements)) {
+      updateSharedContent((shared) => ({
+        ...shared,
+        courses: nextData.courses,
+        assignments: nextData.assignments,
+        announcements: nextData.announcements,
+      }));
+    }
   };
 
   const addActivity = (title, detail, icon = "book") => {
@@ -533,12 +674,64 @@ function App() {
     }));
   };
 
-  const login = async ({ email, password, remember }) => {
-    const user = await authenticateUser({ email, password, remember });
+  const login = async ({ email, password }) => {
+    const user = await authenticateUser({ email, password });
     setStore((current) => current.user?.id === user.id
       ? { ...current, user }
-      : { user, data: makeLmsData(readStored(`${STORAGE_KEY}:${user.id}`)?.data) });
+      : { user, data: mergeSharedContent(makeLmsData(readStored(`${STORAGE_KEY}:${user.id}`)?.data), sharedContentRef.current) });
     setAuthState({ loading: false, user, error: "" });
+    refreshRegisteredUsers();
+  };
+
+  const refreshRegisteredUsers = () => {
+    try {
+      setRegisteredUsers(getRegisteredUsers());
+    } catch (error) {
+      console.error("Could not refresh registered LearnNova users.", error);
+    }
+  };
+
+  const loginAdmin = async (credentials) => {
+    const admin = await authenticateAdmin(credentials);
+    setAdminState({ admin, error: "" });
+  };
+
+  const logoutAdmin = () => {
+    try {
+      signOutAdmin();
+      setAdminState({ admin: null, error: "" });
+    } catch (error) {
+      window.alert(error.message || "Could not clear the local admin session.");
+    }
+  };
+
+  const updateSharedContent = (updater) => {
+    const current = sharedContentRef.current;
+    const next = typeof updater === "function" ? updater(current) : updater;
+    const entries = [
+      [SHARED_COURSE_KEY, next.courses],
+      [SHARED_ASSIGNMENT_KEY, next.assignments],
+      [SHARED_ANNOUNCEMENT_KEY, next.announcements],
+    ];
+    const previous = [];
+    try {
+      entries.forEach(([key]) => previous.push([key, localStorage.getItem(key)]));
+      entries.forEach(([key, value]) => localStorage.setItem(key, JSON.stringify(value)));
+    } catch (error) {
+      previous.forEach(([key, value]) => {
+        try {
+          if (value === null) localStorage.removeItem(key);
+          else localStorage.setItem(key, value);
+        } catch (rollbackError) {
+          console.error(`Could not restore ${key} after a failed LMS update.`, rollbackError);
+        }
+      });
+      console.error("Could not save shared LearnNova LMS data.", error);
+      window.alert("The LMS changes could not be saved in browser storage.");
+      return;
+    }
+    sharedContentRef.current = next;
+    setSharedContent(next);
   };
 
   const logout = () => {
@@ -558,6 +751,11 @@ function App() {
   };
   const toggleTheme = () => setTheme((current) => current === "dark" ? "light" : "dark");
 
+  const enrollments = registeredUsers.flatMap((user) => {
+    const userData = mergeSharedContent(makeLmsData(readStored(`${STORAGE_KEY}:${user.id}`)?.data), sharedContent);
+    return userData.courses.filter((course) => course.enrolled).map((course) => ({ user, course }));
+  });
+
   if (authState.loading) {
     return <div className="auth-loading" role="status">Restoring your LearnNova session…</div>;
   }
@@ -565,8 +763,12 @@ function App() {
   return (
     <Routes>
       <Route path="/login" element={store.user ? <Navigate to="/app" replace /> : <LoginPage initialMode="signin" onLogin={login} authError={authState.error} />} />
-      <Route path="/signup" element={store.user ? <Navigate to="/app" replace /> : <LoginPage initialMode="signup" onLogin={login} authError={authState.error} />} />
+      <Route path="/signup" element={store.user ? <Navigate to="/app" replace /> : <LoginPage initialMode="signup" onLogin={login} onRegistered={refreshRegisteredUsers} authError={authState.error} />} />
       <Route path="/reset-password" element={<Navigate to="/login" replace />} />
+      <Route path="/admin/login" element={adminState.admin ? <Navigate to="/admin" replace /> : <AdminLoginPage onLogin={loginAdmin} authError={adminState.error} />} />
+      <Route path="/admin" element={adminState.admin
+        ? <AdminModule admin={adminState.admin} onLogout={logoutAdmin} users={registeredUsers} sharedData={sharedContent} onUpdateSharedData={updateSharedContent} enrollments={enrollments} />
+        : <Navigate to="/admin/login" replace />} />
       <Route path="/" element={<CampusHome user={store.user} data={store.data} theme={theme} onToggleTheme={toggleTheme} />} />
       <Route path="/campus" element={<CampusHome user={store.user} data={store.data} theme={theme} onToggleTheme={toggleTheme} />} />
       <Route element={store.user ? <AppLayout user={store.user} onLogout={logout} data={store.data} updateData={updateData} addActivity={addActivity} updateUser={updateUser} theme={theme} onToggleTheme={toggleTheme} /> : <Navigate to="/login" replace />}>
@@ -599,7 +801,7 @@ function BrandLogo({ className = "" }) {
   );
 }
 
-function LoginPage({ initialMode, onLogin, authError }) {
+function LoginPage({ initialMode, onLogin, onRegistered, authError }) {
   const [mode, setMode] = useState(initialMode);
   const [showPassword, setShowPassword] = useState(false);
   const [email, setEmail] = useState("");
@@ -607,7 +809,6 @@ function LoginPage({ initialMode, onLogin, authError }) {
   const [department, setDepartment] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
-  const [remember, setRemember] = useState(true);
   const [error, setError] = useState(authError || "");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
@@ -642,13 +843,14 @@ function LoginPage({ initialMode, onLogin, authError }) {
         }
         if (password !== confirmPassword) throw new Error("The passwords do not match.");
         await registerStudent({ fullName, email: normalizedEmail, department, password });
+        onRegistered?.();
         setNotice("Your student account has been created. Sign in to open your dashboard.");
         setPassword("");
         setConfirmPassword("");
         setMode("signin");
       } else if (mode === "signin") {
         if (!password) throw new Error("Enter your password.");
-        await onLogin({ email: normalizedEmail, password, remember });
+        await onLogin({ email: normalizedEmail, password });
         navigate("/app", { replace: true });
       } else if (mode === "forgot") {
         if (password.length < 8 || !/[a-z]/.test(password) || !/[A-Z]/.test(password) || !/\d/.test(password)) {
@@ -732,7 +934,6 @@ function LoginPage({ initialMode, onLogin, authError }) {
                 <div className="input-with-icon"><LockKeyhole size={17} /><input id="confirm-password" type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} autoComplete="new-password" required minLength="8" /></div>
               </>}
             </>
-            {!isSignup && !isForgot && <label className="remember-me"><input type="checkbox" checked={remember} onChange={(event) => setRemember(event.target.checked)} /><span>Remember me</span></label>}
             {error && <p className="form-error" role="alert">{error}</p>}
             {notice && <p className="form-success" role="status">{notice}</p>}
             <button className="button button-primary login-submit" type="submit" disabled={busy}>{busy ? "Please wait…" : isSignup ? "Create account" : isForgot ? "Reset local password" : "Sign in"} {!busy && <ArrowRight size={17} />}</button>
@@ -775,6 +976,7 @@ function TopNavigation({ user, data, theme, onToggleTheme, onLogout }) {
       <div className="top-navigation-actions">
         {user && <label className="top-search"><Search size={16} /><input aria-label="Search courses" placeholder="Search courses" onKeyDown={(event) => { if (event.key === "Enter") navigate(`/browse?q=${encodeURIComponent(event.currentTarget.value)}`); }} /></label>}
         <button className="icon-button theme-toggle" onClick={onToggleTheme} aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}>{theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}</button>
+        <Link className="admin-login-link" to="/admin/login">Admin</Link>
         {user && <div className="notification-wrap">
           <button className={`icon-button notification-button ${notificationsOpen ? "icon-button-active" : ""}`} onClick={() => setNotificationsOpen(!notificationsOpen)} aria-label="Notifications"><Bell size={18} />{notifications.length > 0 && <i />}</button>
           {notificationsOpen && <div className="notification-popover"><div className="popover-heading"><b>Announcements</b><Link to="/announcements">See all</Link></div>{notifications.length ? notifications.map((notice) => <div className="notification-item" key={notice.id}><span className="notification-dot" /><span><b>{notice.title}</b><small>{dateText(notice.date)}</small></span></div>) : <p className="notification-empty">You're all caught up.</p>}</div>}

@@ -1,6 +1,15 @@
 const USERS_KEY = "learnnova_users";
-const SESSION_KEY = "learnnova_session";
+const USER_SESSION_KEY = "learnnova_user_session";
+const LEGACY_SESSION_KEY = "learnnova_session";
+const ADMINS_KEY = "learnnova_admins";
+const ADMIN_SESSION_KEY = "learnnova_admin_session";
 const PASSWORD_ITERATIONS = 310000;
+let demoAdminCreation;
+const DEMO_ADMIN = {
+  name: "LearnNova Administrator",
+  email: "admin@learnnova.com",
+  password: "LearnNova@Admin123",
+};
 
 const normalizeEmail = (email) => email.trim().toLowerCase();
 
@@ -37,6 +46,27 @@ const saveUsers = (users) => {
     window.localStorage.setItem(USERS_KEY, JSON.stringify(users));
   } catch {
     throw new Error("Could not save your account in browser storage. Check available storage space and browser privacy settings.");
+  }
+};
+
+const readAdmins = () => {
+  const serialized = window.localStorage.getItem(ADMINS_KEY);
+  if (!serialized) return [];
+  let admins;
+  try {
+    admins = JSON.parse(serialized);
+  } catch {
+    throw new Error("Saved LearnNova admin accounts could not be read. The local account data may be damaged.");
+  }
+  if (!Array.isArray(admins)) throw new Error("Saved LearnNova admin data has an invalid format.");
+  return admins;
+};
+
+const saveAdmins = (admins) => {
+  try {
+    window.localStorage.setItem(ADMINS_KEY, JSON.stringify(admins));
+  } catch {
+    throw new Error("Could not save the admin account in browser storage.");
   }
 };
 
@@ -86,46 +116,117 @@ const validatePasswordStrength = (password) => {
   }
 };
 
-const findStoredSession = () => {
-  const localSession = window.localStorage.getItem(SESSION_KEY);
-  const sessionSession = window.sessionStorage.getItem(SESSION_KEY);
-  const serialized = localSession || sessionSession;
+const readSession = (sessionKey, legacyKey) => {
+  const serialized = window.localStorage.getItem(sessionKey)
+    || window.localStorage.getItem(legacyKey)
+    || window.sessionStorage.getItem(legacyKey);
   if (!serialized) return null;
   try {
     const session = JSON.parse(serialized);
     if (typeof session.userId !== "string") throw new Error("invalid session");
+    if (!window.localStorage.getItem(sessionKey)) {
+      window.localStorage.setItem(sessionKey, serialized);
+      window.localStorage.removeItem(legacyKey);
+      window.sessionStorage.removeItem(legacyKey);
+    }
     return session;
   } catch {
     throw new Error("The saved LearnNova session is invalid. Sign in again to continue.");
   }
 };
 
-const clearStoredSession = () => {
-  window.localStorage.removeItem(SESSION_KEY);
-  window.sessionStorage.removeItem(SESSION_KEY);
+const clearStoredSession = (sessionKey, legacyKey) => {
+  window.localStorage.removeItem(sessionKey);
+  window.localStorage.removeItem(legacyKey);
+  window.sessionStorage.removeItem(legacyKey);
 };
 
-const saveSession = (userId, remember) => {
-  const storage = remember ? window.localStorage : window.sessionStorage;
-  const otherStorage = remember ? window.sessionStorage : window.localStorage;
+const saveSession = (sessionKey, userId) => {
   try {
-    storage.setItem(SESSION_KEY, JSON.stringify({ userId }));
-    otherStorage.removeItem(SESSION_KEY);
+    window.localStorage.setItem(sessionKey, JSON.stringify({ userId }));
   } catch {
     throw new Error("Could not save your sign-in session in browser storage.");
   }
 };
 
 export const restoreUserSession = () => {
-  const session = findStoredSession();
+  const session = readSession(USER_SESSION_KEY, LEGACY_SESSION_KEY);
   if (!session) return null;
   const user = readUsers().find((savedUser) => savedUser.id === session.userId);
   if (!user) {
-    clearStoredSession();
+    clearStoredSession(USER_SESSION_KEY, LEGACY_SESSION_KEY);
     return null;
   }
   return makePublicUser(user);
 };
+
+const makePublicAdmin = (admin) => ({
+  id: admin.id,
+  name: admin.name,
+  email: admin.email,
+  role: "admin",
+  title: admin.title,
+  createdAt: admin.createdAt,
+});
+
+export const ensureDemoAdminAccount = () => {
+  if (!demoAdminCreation) {
+    demoAdminCreation = (async () => {
+      if (readAdmins().length) return;
+      const passwordSalt = makeSalt();
+      const passwordHash = await derivePasswordHash(DEMO_ADMIN.password, passwordSalt);
+      if (readAdmins().length) return;
+      saveAdmins([{
+        id: crypto.randomUUID(),
+        name: DEMO_ADMIN.name,
+        email: DEMO_ADMIN.email,
+        title: "LearnNova Administrator",
+        passwordHash,
+        passwordSalt,
+        passwordAlgorithm: "PBKDF2-SHA-256",
+        passwordIterations: PASSWORD_ITERATIONS,
+        role: "admin",
+        createdAt: new Date().toISOString(),
+      }]);
+    })().catch((error) => {
+      demoAdminCreation = null;
+      throw error;
+    });
+  }
+  return demoAdminCreation;
+};
+
+export const restoreAdminSession = () => {
+  const session = readSession(ADMIN_SESSION_KEY, ADMIN_SESSION_KEY);
+  if (!session) return null;
+  const admin = readAdmins().find((savedAdmin) => savedAdmin.id === session.userId);
+  if (!admin) {
+    clearStoredSession(ADMIN_SESSION_KEY, ADMIN_SESSION_KEY);
+    return null;
+  }
+  return makePublicAdmin(admin);
+};
+
+export const authenticateAdmin = async ({ email, password }) => {
+  const normalizedEmail = normalizeEmail(email);
+  const admin = readAdmins().find((savedAdmin) => savedAdmin.email === normalizedEmail);
+  if (!admin || typeof admin.passwordSalt !== "string" || typeof admin.passwordHash !== "string") {
+    throw new Error("Email or password is incorrect.");
+  }
+  const hash = await derivePasswordHash(password, admin.passwordSalt, admin.passwordIterations || PASSWORD_ITERATIONS);
+  if (!hashesMatch(hash, admin.passwordHash)) {
+    throw new Error("Email or password is incorrect.");
+  }
+  saveSession(ADMIN_SESSION_KEY, admin.id);
+  return makePublicAdmin(admin);
+};
+
+export const signOutAdmin = () => {
+  clearStoredSession(ADMIN_SESSION_KEY, ADMIN_SESSION_KEY);
+};
+
+export const getRegisteredUsers = () =>
+  readUsers().map(makePublicUser);
 
 export const registerStudent = async ({ fullName, email, department, password }) => {
   if (!fullName.trim() || !email.trim() || !department || !password) {
@@ -174,7 +275,7 @@ const hashesMatch = (actual, expected) => {
   return difference === 0;
 };
 
-export const authenticateUser = async ({ email, password, remember }) => {
+export const authenticateUser = async ({ email, password }) => {
   const normalizedEmail = normalizeEmail(email);
   const user = readUsers().find((savedUser) => savedUser.email === normalizedEmail);
   if (!user || typeof user.passwordSalt !== "string" || typeof user.passwordHash !== "string") {
@@ -184,7 +285,7 @@ export const authenticateUser = async ({ email, password, remember }) => {
   if (!hashesMatch(hash, user.passwordHash)) {
     throw new Error("Email or password is incorrect.");
   }
-  saveSession(user.id, remember);
+  saveSession(USER_SESSION_KEY, user.id);
   return makePublicUser(user);
 };
 
@@ -210,7 +311,7 @@ export const resetLocalPassword = async ({ email, password }) => {
 };
 
 export const signOutUser = () => {
-  clearStoredSession();
+  clearStoredSession(USER_SESSION_KEY, LEGACY_SESSION_KEY);
 };
 
 export const updateLocalProfile = (userId, fullName) => {

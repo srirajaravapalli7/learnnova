@@ -1,65 +1,147 @@
-# LearnNova – 3D University LMS
+# LearnNova University
 
-LearnNova is a React-based university LMS with an interactive 3D campus, student and instructor workspaces, course management, assignments, analytics, certificates, and browser-based demo authentication.
+### Explore. Learn. Evolve.
 
-## Authentication
+LearnNova University is a modern, interactive learning management system (LMS) built as a digital university experience. Explore an interactive 3D campus, browse courses, track learning progress, and work with assignments through student and instructor-oriented workspaces.
 
-Sign-up and sign-in use browser `localStorage` only. Accounts are saved under `learnnova_users`; passwords are derived with PBKDF2-SHA-256 and a unique random salt using the Web Crypto API. Passwords are never saved in plain text. “Remember me” stores a session in `localStorage`; otherwise, the session is kept in `sessionStorage`.
+> **Project note:** LearnNova is a client-side college project. Accounts and LMS content are stored in the browser, so data is local to the current browser and device.
 
-**This is demo-only authentication, not production security.** Browser users and scripts running on the same origin can read or alter local storage, and local password reset cannot verify email ownership. Roles and account records are not protected by a server. Do not use this system for real accounts or sensitive data.
+## About LearnNova
 
-LMS course, assignment, and preference data also remains local to the browser and is separated by local account.
+LearnNova brings a virtual campus and a sample learning portal together in one React application. Its campus scene features selectable academic buildings, while the LMS includes course, assignment, progress, and community pages. Sample courses, assignments, activity, and achievement data make it possible to explore the interface after registering.
 
-## Features
+## Key Features
 
-- Interactive 3D campus with academic departments
-- Local student sign-up, sign-in, session persistence, logout, and demo password reset
-- Per-account student profiles with generated student IDs
-- Student and instructor dashboard layouts
-- Course catalog, assignments, analytics, certificates, and profile settings
-- Responsive layout, dark/light themes, and local LMS data
+- Interactive 3D university campus with selectable departments and featured courses
+- Responsive LMS interface with dark and light themes
+- Course catalog with search, category filters, enrollment, modules, and materials
+- Role-aware student and instructor views
+- Assignment submission, review, grading, and feedback flows
+- Study analytics, grades, activity, announcements, and sample certificates
+- Local account registration, sign-in, session persistence, and profile editing
 
-## Requirements
+## Student Features
+
+- Register a student account and receive a generated student ID
+- Browse, search, filter, and enroll in available courses
+- View course details, modules, and listed learning materials
+- Submit assignment responses and optionally attach a file name
+- Review submission status, grades, and instructor feedback
+- View study activity, analytics, announcements, and sample certificates
+- Download a certificate as an SVG image
+- Update a profile name and choose local notification preferences
+
+File attachments are represented by their file name in the demo; the file itself is not uploaded or stored by the app.
+
+## Instructor Features
+
+The application includes instructor-oriented views for course and learning management:
+
+- Create, edit, and delete courses
+- View course rosters (the included roster entries are sample data)
+- Create and delete assignments
+- Review student submissions and save grades with written feedback
+- Post and remove campus announcements
+- View course and submission analytics
+
+**Account limitation:** Public registration creates student accounts only. Instructor-specific screens are available to accounts with an instructor role, but the project does not provide an instructor registration or role-assignment flow.
+
+## Authentication System
+
+Registration and sign-in run entirely in the browser. Account records are saved in Local Storage. Passwords are processed with PBKDF2-SHA-256 and a unique random salt using the browser Web Crypto API; plain-text passwords are not stored.
+
+- Passwords must contain at least 8 characters, including uppercase and lowercase letters and a number.
+- “Remember me” stores the sign-in session in Local Storage; otherwise, the session uses Session Storage.
+- The local password-reset flow does not verify email ownership.
+- This is a demonstration authentication system, **not production security**. Browser users and scripts running on the same origin can access or change locally stored data. Do not use real or sensitive account information.
+
+## Technologies Used
+
+- **React 18** — user interface
+- **Vite 6** — development server and production build
+- **React Router 6** — client-side routing
+- **Three.js**, **React Three Fiber**, and **Drei** — interactive 3D campus
+- **Lucide React** — interface icons
+- **CSS** — responsive styling and themes
+- **Browser Local Storage, Session Storage, and Web Crypto API** — local data and authentication
+
+## Project Folder Structure
+
+```text
+learnnova/
+├── public/
+│   └── learnnova.svg
+├── src/
+│   ├── App.jsx          # App routes, LMS pages, and application logic
+│   ├── auth.js          # Local registration, sign-in, and session helpers
+│   ├── CampusScene.jsx  # Three.js campus scene
+│   ├── StarDust.jsx     # Animated campus particle effect
+│   ├── main.jsx         # React entry point and router setup
+│   └── styles.css       # Application styles and themes
+├── index.html           # HTML entry point and page metadata
+├── package.json         # Scripts and dependencies
+├── vite.config.js       # Vite configuration
+└── vercel.json          # Hosting route rewrite
+```
+
+## Installation and Setup Instructions
+
+### Prerequisites
 
 - Node.js 18 or newer
 - npm
-- A modern browser with Web Crypto API support (localhost or HTTPS)
+- A current browser with Web Crypto API support
 
-## Installation and development
+### Install dependencies
+
+Clone the repository, open a terminal in the project directory, and run:
 
 ```bash
 npm install
+```
+
+## How to Run the Project Locally
+
+Start the Vite development server:
+
+```bash
 npm run dev
 ```
 
-Open the local URL printed by Vite. Register from `/signup`, then sign in using the same email and password. Test sign-out, incorrect credentials, duplicate registration, refresh persistence, and the local password-reset flow. The reset flow has no email verification.
+Open the local address printed in the terminal (usually `http://localhost:5173`). Register at **Sign up** to create a student account, then sign in. The development server supports the Web Crypto API requirement through localhost.
 
-## Build and preview
+To create and preview a production build:
 
 ```bash
 npm run build
 npm run preview
 ```
 
-## Vercel deployment
+## Local Storage and Data Management
 
-No authentication environment variables or external database setup are required. Deploy the Vite project to Vercel over HTTPS; `vercel.json` sends app routes to the React entry point. User accounts and LMS data remain in each browser and do not sync across devices.
+LearnNova keeps its data in the current browser; it is not synchronized between browsers or devices.
 
-## Project structure
+- Account records are stored in Local Storage under `learnnova_users`.
+- The sign-in session uses `learnnova_session` in Local Storage when “Remember me” is selected, or in Session Storage otherwise.
+- LMS data is stored separately for each signed-in account using a `campusly-lms-v1:<userId>` key.
+- The selected theme is saved under `learnsphere-theme-v1`.
+- Sample courses, assignments, announcements, analytics, and certificates are provided by the app and can be restored from Settings.
+- Clearing browser storage removes locally saved accounts, sessions, preferences, and LMS changes.
 
-```text
-learnnova-university/
-├── public/
-│   └── learnnova.svg
-├── src/
-│   ├── App.jsx
-│   ├── auth.js
-│   ├── CampusScene.jsx
-│   ├── StarDust.jsx
-│   ├── main.jsx
-│   └── styles.css
-├── index.html
-├── package.json
-├── vercel.json
-└── vite.config.js
-```
+## Future Enhancements
+
+Potential areas to build on include:
+
+- Add an instructor onboarding and account-role management flow
+- Support cross-device account and learning-data synchronization
+- Add real file handling for course materials and assignment submissions
+- Expand course authoring, learner progress, and certificate management
+
+These are ideas for future development, not features currently provided by the project.
+
+## Author / Project Information
+
+- **Project:** LearnNova University
+- **Tagline:** Explore. Learn. Evolve.
+- **Type:** College project — client-side LMS demonstration
+- **Repository:** [srirajaravapalli7/learnnova](https://github.com/srirajaravapalli7/learnnova)
